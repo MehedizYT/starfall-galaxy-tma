@@ -1,0 +1,19 @@
+{
+  "name": "starfall-galaxy-server",
+  "version": "1.0.0",
+  "description": "Backend for Starfall Galaxy referrals, payments, and bot commands",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "node-fetch": "^2.6.9",
+    "node-json-db": "^2.2.0",
+    "node-telegram-bot-api": "^0.61.0"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
