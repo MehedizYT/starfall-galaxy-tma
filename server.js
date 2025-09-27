@@ -1,8 +1,9 @@
-const express = require('express');
-const cors = require('cors');
-const TelegramBot = require('node-telegram-bot-api');
-const { JSONFilePreset } = require('lowdb/node');
-const crypto = require('crypto');
+// --- UPDATED: Using ES Module import syntax ---
+import express from 'express';
+import cors from 'cors';
+import TelegramBot from 'node-telegram-bot-api';
+import { JSONFilePreset } from 'lowdb/node';
+import crypto from 'crypto';
 
 // --- CONFIGURATION ---
 const PORT = process.env.PORT || 3000;
