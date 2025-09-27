@@ -15,7 +15,7 @@ const { JSONFile } = require('lowdb/node');
 const BOT_TOKEN = process.env.BOT_TOKEN || '8325959442:AAH_12MHRzxemyQLc6XTkoBjm9ei5lZlIr4';
 const WEB_APP_URL = process.env.WEB_APP_URL || 'https://starfallgalaxy.blogspot.com';
 // --- NEW: Add your bot's username (without the '@') ---
-const BOT_USERNAME = process.env.BOT_USERNAME || 'starfallgalaxy_bot'; // e.g., 'StarfallGalaxyBot'
+const BOT_USERNAME = process.env.BOT_USERNAME || 'starfallgalaxy_bot'; // e.g., 'starfallgalaxy_bot'
 
 const REFERRER_BONUS = 1.0;  // Bonus for the person who invites
 const REFEREE_BONUS = 0.5;   // Bonus for the new player who joins (handled by frontend)
