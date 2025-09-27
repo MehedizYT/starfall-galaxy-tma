@@ -1,127 +1,203 @@
-const express = require('express');
-const cors = require('cors');
-const crypto = require('crypto');
-const { JsonDB, Config } = require('node-json-db');
+// -------------------------------------------------------------------
+// STARFALL GALAXY - BACKEND SERVER
+// -------------------------------------------------------------------
 
-const app = express();
+// --- 1. IMPORTS ---
+const express = require('express');
+const bodyParser = require('body-parser');
+const cors = require('cors');
+const { Telegraf, Markup } = require('telegraf');
+const crypto = require('crypto');
+const { Low } = require('lowdb');
+const { JSONFile } = require('lowdb/node');
+
+// --- 2. CONFIGURATION ---
+// IMPORTANT: Replace these with your actual bot token and web app URL
+const BOT_TOKEN = process.env.BOT_TOKEN || '8325959442:AAH_12MHRzxemyQLc6XTkoBjm9ei5lZlIr4';
+const WEB_APP_URL = process.env.WEB_APP_URL || 'https://starfallgalaxy.blogspot.com'; // The URL where you host the HTML game
+
+const REFERRAL_BONUS = 1.0; // The bonus (in Telegram Stars ⭐️) the referrer receives
 const PORT = process.env.PORT || 3000;
 
-// --- IMPORTANT: SET THIS IN YOUR RENDER ENVIRONMENT VARIABLES ---
-const BOT_TOKEN = process.env.BOT_TOKEN;
-if (!BOT_TOKEN) {
-    console.error("FATAL ERROR: BOT_TOKEN is not set. Please set it in your environment variables.");
-    process.exit(1);
+// --- 3. DATABASE SETUP (using lowdb for a simple JSON file database) ---
+const adapter = new JSONFile('db.json');
+const defaultData = { users: {} };
+const db = new Low(adapter, defaultData);
+
+// Helper function to get or create a user
+async function getOrCreateUser(userId) {
+    if (!db.data.users[userId]) {
+        db.data.users[userId] = {
+            id: userId,
+            stars: 0.0, // This is the balance the BACKEND manages
+            unclaimedRewards: 0.0,
+            registered: false,
+            referrer: null,
+            referrals: [],
+            createdAt: new Date().toISOString(),
+        };
+        await db.write();
+    }
+    return db.data.users[userId];
 }
 
-// Simple file-based database
-const db = new JsonDB(new Config("referralDB", true, true, '/'));
+// --- 4. TELEGRAM BOT SETUP ---
+const bot = new Telegraf(BOT_TOKEN);
 
-app.use(cors());
-app.use(express.json());
+// '/start' command handler
+bot.start(async (ctx) => {
+    const userId = ctx.from.id;
+    const startPayload = ctx.startPayload;
+    const user = await getOrCreateUser(userId);
 
-// Function to validate the initData string from Telegram
-function validateInitData(initData) {
-    const urlParams = new URLSearchParams(initData);
-    const hash = urlParams.get('hash');
-    urlParams.delete('hash');
+    // Handle referral logic
+    if (startPayload && startPayload.startsWith('ref_')) {
+        const referrerId = startPayload.substring(4);
+        if (referrerId && Number(referrerId) !== userId && !user.referrer) {
+            const referrer = await getOrCreateUser(referrerId);
+            if (referrer) {
+                user.referrer = referrerId;
+                referrer.referrals.push(userId);
+                await db.write();
+                console.log(`User ${userId} was referred by ${referrerId}`);
+            }
+        }
+    }
 
-    const dataCheckString = Array.from(urlParams.entries())
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([key, value]) => `${key}=${value}`)
-        .join('\n');
+    // Send welcome message with a button to open the Web App
+    await ctx.reply(
+        "🚀 Welcome to Starfall Galaxy!\n\nCatch falling stars, avoid bombs, and earn real rewards. Click the button below to start your adventure!",
+        Markup.inlineKeyboard([
+            Markup.button.webApp('🌟 Play Now! 🌟', WEB_APP_URL)
+        ])
+    );
+});
+
+// '/stats' command handler (example of another useful command)
+bot.command('stats', async (ctx) => {
+    const userId = ctx.from.id;
+    const user = db.data.users[userId];
+
+    if (!user) {
+        return ctx.reply("You haven't played yet! Type /start to begin.");
+    }
+    
+    // The frontend game saves its own data (crystals, lives etc) in browser storage.
+    // The backend only knows about stars and referrals.
+    const statsMessage = `
+📊 *Your Starfall Stats* 📊
+
+⭐️ *Telegram Stars:* ${user.stars.toFixed(4)}
+👥 *Friends Invited:* ${user.referrals.length}
+
+To see your Crystal balance, lives, and skins, please open the game!
+    `;
+    
+    return ctx.replyWithMarkdown(statsMessage);
+});
+
+
+// --- 5. EXPRESS API SERVER SETUP ---
+const app = express();
+app.use(cors()); // Allow requests from your web app
+app.use(bodyParser.json());
+
+// Helper function to validate Telegram's initData
+function isInitDataValid(initData) {
+    const data = new URLSearchParams(initData);
+    const hash = data.get('hash');
+    data.delete('hash');
+
+    // Sort keys alphabetically for consistent hash calculation
+    const sortedKeys = Array.from(data.keys()).sort();
+    let dataCheckString = sortedKeys.map(key => `${key}=${data.get(key)}`).join('\n');
 
     const secretKey = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
     const calculatedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
-
+    
     return calculatedHash === hash;
 }
 
-
-// Endpoint for a user to register and process a potential referral
+// API Endpoint: /register
+// The game calls this when a new user starts.
 app.post('/register', async (req, res) => {
     const { initData } = req.body;
 
-    if (!initData || !validateInitData(initData)) {
-        return res.status(403).json({ error: 'Invalid Telegram data' });
+    if (!initData || !isInitDataValid(initData)) {
+        return res.status(401).json({ error: 'Invalid authentication data' });
     }
 
-    const params = new URLSearchParams(initData);
-    const user = JSON.parse(params.get('user'));
-    const startParam = params.get('start_param');
+    const data = new URLSearchParams(initData);
+    const userObject = JSON.parse(data.get('user'));
+    const userId = userObject.id;
 
-    try {
-        const userPath = `/users/${user.id}`;
-        const userExists = await db.exists(userPath);
+    const user = await getOrCreateUser(userId);
 
-        if (userExists) {
-            return res.json({ status: 'already_registered' });
+    // If the user is new and has a referrer, credit the referrer
+    if (!user.registered && user.referrer) {
+        const referrer = db.data.users[user.referrer];
+        if (referrer) {
+            referrer.unclaimedRewards = (referrer.unclaimedRewards || 0) + REFERRAL_BONUS;
+            console.log(`Credited ${REFERRAL_BONUS} stars to referrer ${user.referrer} for user ${userId} joining.`);
         }
-
-        // User is new, register them
-        await db.push(userPath, { id: user.id, username: user.username, rewardsToClaim: 0 });
-
-        // If they were referred, credit the inviter
-        if (startParam && startParam.startsWith('ref_')) {
-            const inviterId = startParam.split('_')[1];
-            if (inviterId && inviterId != user.id) {
-                const inviterPath = `/users/${inviterId}`;
-                const inviterExists = await db.exists(inviterPath);
-                
-                // Make sure the inviter is also a user in our system
-                if (inviterExists) {
-                    await db.push(`${inviterPath}/rewardsToClaim`, (await db.getData(`${inviterPath}/rewardsToClaim`)) + 1);
-                }
-            }
-        }
-        
-        res.json({ status: 'registered_successfully' });
-
-    } catch (error) {
-        console.error("Error in /register:", error);
-        res.status(500).json({ error: 'Internal server error' });
     }
+    
+    user.registered = true;
+    await db.write();
+
+    console.log(`User ${userId} registered or logged in.`);
+    res.status(200).json({ message: 'User registered successfully' });
 });
 
-
-// Endpoint for an existing user to claim their accumulated rewards
+// API Endpoint: /claim-rewards
+// The game calls this to get referral bonuses for the player.
 app.post('/claim-rewards', async (req, res) => {
     const { initData } = req.body;
 
-    if (!initData || !validateInitData(initData)) {
-        return res.status(403).json({ error: 'Invalid Telegram data' });
+    if (!initData || !isInitDataValid(initData)) {
+        return res.status(401).json({ error: 'Invalid authentication data' });
     }
 
-    const params = new URLSearchParams(initData);
-    const user = JSON.parse(params.get('user'));
+    const data = new URLSearchParams(initData);
+    const userObject = JSON.parse(data.get('user'));
+    const userId = userObject.id;
 
-    try {
-        const userPath = `/users/${user.id}`;
-        const userExists = await db.exists(userPath);
-
-        if (!userExists) {
-            return res.json({ rewards: 0 }); // Should not happen if they registered, but handle it
-        }
-
-        const rewards = await db.getData(`${userPath}/rewardsToClaim`);
-
-        if (rewards > 0) {
-            // Reset rewards to 0 after claiming
-            await db.push(`${userPath}/rewardsToClaim`, 0);
-        }
-
-        res.json({ rewards: rewards });
-
-    } catch (error) {
-        console.error("Error in /claim-rewards:", error);
-        res.status(500).json({ error: 'Internal server error' });
+    const user = await getOrCreateUser(userId);
+    
+    const rewardsToClaim = user.unclaimedRewards || 0;
+    if (rewardsToClaim > 0) {
+        user.stars += rewardsToClaim;
+        user.unclaimedRewards = 0;
+        await db.write();
+        console.log(`User ${userId} claimed ${rewardsToClaim} stars.`);
+        return res.status(200).json({ rewards: rewardsToClaim });
     }
+
+    res.status(200).json({ rewards: 0 });
 });
 
-// Health check endpoint for Render
-app.get('/', (req, res) => {
-    res.send('Starfall Galaxy Server is running!');
-});
 
-app.listen(PORT, () => {
-    console.log(`Server listening on port ${PORT}`);
+// --- 6. START EVERYTHING ---
+async function startServer() {
+    await db.read(); // Load the database
+    
+    app.listen(PORT, () => {
+        console.log(`✅ API Server is running on port ${PORT}`);
+    });
+    
+    bot.launch(() => {
+        console.log('✅ Telegram Bot is running');
+    });
+}
+
+startServer();
+
+// Graceful shutdown
+process.once('SIGINT', () => {
+    bot.stop('SIGINT');
+    process.exit();
+});
+process.once('SIGTERM', () => {
+    bot.stop('SIGTERM');
+    process.exit();
 });
