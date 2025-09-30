@@ -21,17 +21,25 @@ const defaultData = { users: {} };
 const db = await JSONFilePreset('db.json', defaultData);
 
 // --- TELEGRAM BOT SETUP ---
-const bot = new TelegramBot(BOT_TOKEN);
+// --- FIX 1: Disable polling to rely exclusively on the webhook. ---
+const bot = new TelegramBot(BOT_TOKEN, { polling: false });
+
 const WEBHOOK_URL = `${SERVER_URL}/bot${BOT_TOKEN}`;
 bot.setWebHook(WEBHOOK_URL, {
     secret_token: SECRET_TOKEN,
+}).then(() => {
+    console.log(`Webhook set to ${WEBHOOK_URL}`);
+}).catch(err => {
+    console.error('Error setting webhook:', err);
 });
 
 app.post(`/bot${BOT_TOKEN}`, (req, res) => {
+    // We verify the secret token to ensure the request is from Telegram
     if (req.header('x-telegram-bot-api-secret-token') === SECRET_TOKEN) {
         bot.processUpdate(req.body);
         res.sendStatus(200);
     } else {
+        console.warn('Received a request with an invalid secret token.');
         res.sendStatus(403);
     }
 });
@@ -59,6 +67,7 @@ function getUserFromInitData(initData) {
     return JSON.parse(new URLSearchParams(initData).get('user'));
 }
 
+// --- FIX 3: Updated getOrCreateUser to handle rewards more clearly. ---
 async function getOrCreateUser(userId, username, referrerId = null) {
     await db.read();
     let user = db.data.users[userId];
@@ -88,9 +97,9 @@ async function getOrCreateUser(userId, username, referrerId = null) {
         message = "Welcome to Starfall Galaxy! You've received 1 ⭐️ as a welcome bonus!";
         
         // Handle referral if present
-        if (referrerId && db.data.users[referrerId] && referrerId != userId) {
+        if (referrerId && db.data.users[referrerId] && referrerId.toString() !== userId.toString()) {
             user.referredBy = referrerId;
-            user.telegramStars += 0.5; // New user bonus
+            user.telegramStars += 0.5; // New user bonus for being referred
             message += "\nYou also got 0.5 ⭐️ for joining from a friend's invite!";
 
             // Reward the referrer
@@ -106,12 +115,14 @@ async function getOrCreateUser(userId, username, referrerId = null) {
 
 
 // --- BOT COMMANDS ---
+// This handler now correctly works for users who manually type /start or /start ref_...
 bot.onText(/\/start(?: ref_(\d+))?/, async (msg, match) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id.toString();
     const username = msg.from.username || msg.from.first_name;
-    const referrerId = match[1];
+    const referrerId = match[1]; // Will be null if no referral code is present
 
+    // getOrCreateUser will handle the logic for new/existing users and referrals
     await getOrCreateUser(userId, username, referrerId);
 
     const welcomeText = `Welcome to Starfall Galaxy, ${username}!\n\nCatch falling stars, customize your ship, and earn rewards. Use the commands below or tap the button to play!`;
@@ -128,6 +139,7 @@ bot.onText(/\/start(?: ref_(\d+))?/, async (msg, match) => {
 
 bot.onText(/\/invite/, async (msg) => {
     const userId = msg.from.id.toString();
+    // This deep link correctly points to the web app
     const referralLink = `https://t.me/${BOT_USERNAME}/play?startapp=ref_${userId}`;
     const inviteText = `Here is your personal invite link! Share it with friends.\n\nThey get 0.5 ⭐️ and you get 1 ⭐️ when they join!\n\n${referralLink}`;
     bot.sendMessage(msg.chat.id, inviteText);
@@ -160,8 +172,22 @@ app.post('/get-data', async (req, res) => {
 
     try {
         const tgUser = getUserFromInitData(initData);
-        const { user, message } = await getOrCreateUser(tgUser.id.toString(), tgUser.username);
+        let referrerId = null;
+
+        // --- FIX 2: Check initData for the 'start_param' to process web app referrals. ---
+        const urlParams = new URLSearchParams(initData);
+        const startParam = urlParams.get('start_param');
+        if (startParam && startParam.startsWith('ref_')) {
+            referrerId = startParam.substring(4); // Extracts the ID after "ref_"
+            console.log(`Referral detected from Web App deep link. Referrer ID: ${referrerId}`);
+        }
+
+        // Pass the extracted referrerId to the user creation logic
+        const { user, message } = await getOrCreateUser(tgUser.id.toString(), tgUser.username, referrerId);
+        
+        // Respond with the user data and any welcome/referral message
         res.json({ ...user, message });
+
     } catch (e) {
         console.error('Error in /get-data:', e);
         res.status(500).json({ error: 'Internal server error' });
