@@ -1,16 +1,14 @@
 {
-  "name": "starfall-galaxy-server",
+  "name": "starfall-backend",
   "version": "1.0.0",
-  "description": "Backend for Starfall Galaxy Telegram Mini App",
+  "description": "Backend for Starfall Galaxy Telegram game.",
   "main": "server.js",
-  "type": "module",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
+    "better-sqlite3": "^9.4.3",
     "cors": "^2.8.5",
-    "express": "^4.19.2",
-    "lowdb": "^7.0.1",
-    "node-telegram-bot-api": "^0.65.1"
+    "express": "^4.18.3"
   }
 }
