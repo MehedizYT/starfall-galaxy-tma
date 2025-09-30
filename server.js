@@ -1,242 +1,174 @@
-// --- UPDATED: Using ES Module import syntax ---
-import express from 'express';
-import cors from 'cors';
-import TelegramBot from 'node-telegram-bot-api';
-import { JSONFilePreset } from 'lowdb/node';
-import crypto from 'crypto';
-
-// --- CONFIGURATION ---
-const PORT = process.env.PORT || 3000;
-const BOT_TOKEN = process.env.BOT_TOKEN || 'YOUR_TELEGRAM_BOT_TOKEN'; // Set in your environment variables
-const SERVER_URL = process.env.SERVER_URL; // e.g., 'https://starfall-galaxy-full-server.onrender.com'
-const BOT_USERNAME = process.env.BOT_USERNAME || 'starfallgalaxy_bot';
-const SECRET_TOKEN = crypto.createHash('sha256').update(BOT_TOKEN).digest('hex');
+const express = require('express');
+const crypto = require('crypto');
+const cors = require('cors');
+const Database = require('better-sqlite3');
 
 const app = express();
-app.use(express.json());
+const port = process.env.PORT || 3000;
+
+// IMPORTANT: Set this in your Render Environment Variables
+const BOT_TOKEN = process.env.BOT_TOKEN;
+if (!BOT_TOKEN) {
+    console.error("FATAL ERROR: BOT_TOKEN environment variable is not set.");
+    process.exit(1);
+}
+
+// Database setup (Render will create this file in its persistent storage)
+const db = new Database('starfall.db');
+
+// Create table if it doesn't exist
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY,
+    username TEXT,
+    is_bot BOOLEAN,
+    first_name TEXT,
+    last_name TEXT,
+    language_code TEXT,
+    starCrystals REAL DEFAULT 0,
+    telegramStars REAL DEFAULT 0,
+    ownedSkins TEXT DEFAULT '["default"]',
+    equippedSkin TEXT DEFAULT 'default',
+    isSoundEnabled BOOLEAN DEFAULT 1,
+    isGamingFontEnabled BOOLEAN DEFAULT 1,
+    hasSeenTutorial BOOLEAN DEFAULT 0,
+    playerLives INTEGER DEFAULT 5,
+    lastLifeRegenTimestamp INTEGER DEFAULT 0,
+    lastBonusClaimTimestamp INTEGER DEFAULT 0,
+    bonusStreak INTEGER DEFAULT 0,
+    lastConversionTimestamp INTEGER DEFAULT 0,
+    crateAdWatchCount INTEGER DEFAULT 0,
+    createdAt INTEGER,
+    lastLoginAt INTEGER
+  )
+`);
+
 app.use(cors());
+app.use(express.json());
 
-// --- DATABASE SETUP (using lowdb) ---
-const defaultData = { users: {} };
-const db = await JSONFilePreset('db.json', defaultData);
-
-// --- TELEGRAM BOT SETUP ---
-// --- FIX 1: Disable polling to rely exclusively on the webhook. ---
-const bot = new TelegramBot(BOT_TOKEN, { polling: false });
-
-const WEBHOOK_URL = `${SERVER_URL}/bot${BOT_TOKEN}`;
-bot.setWebHook(WEBHOOK_URL, {
-    secret_token: SECRET_TOKEN,
-}).then(() => {
-    console.log(`Webhook set to ${WEBHOOK_URL}`);
-}).catch(err => {
-    console.error('Error setting webhook:', err);
-});
-
-app.post(`/bot${BOT_TOKEN}`, (req, res) => {
-    // We verify the secret token to ensure the request is from Telegram
-    if (req.header('x-telegram-bot-api-secret-token') === SECRET_TOKEN) {
-        bot.processUpdate(req.body);
-        res.sendStatus(200);
-    } else {
-        console.warn('Received a request with an invalid secret token.');
-        res.sendStatus(403);
-    }
-});
-
-
-// --- HELPER FUNCTIONS ---
-function validateInitData(initDataString) {
-    const urlParams = new URLSearchParams(initDataString);
+// --- UTILITY: TELEGRAM INITDATA VALIDATION ---
+function validateInitData(initData) {
+    const urlParams = new URLSearchParams(initData);
     const hash = urlParams.get('hash');
-    const dataToCheck = [];
-    urlParams.sort();
-    urlParams.forEach((val, key) => {
-        if (key !== 'hash') {
-            dataToCheck.push(`${key}=${val}`);
-        }
-    });
+    urlParams.delete('hash');
+    const dataCheckString = Array.from(urlParams.entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, value]) => `${key}=${value}`)
+        .join('\n');
 
-    const secretKey = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN);
-    const calculatedHash = crypto.createHmac('sha256', secretKey.digest()).update(dataToCheck.join('\n')).digest('hex');
-
+    const secretKey = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
+    const calculatedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+    
     return calculatedHash === hash;
 }
 
-function getUserFromInitData(initData) {
-    return JSON.parse(new URLSearchParams(initData).get('user'));
-}
 
-// --- FIX 3: Updated getOrCreateUser to handle rewards more clearly. ---
-async function getOrCreateUser(userId, username, referrerId = null) {
-    await db.read();
-    let user = db.data.users[userId];
-    let message = null;
-    let isNewUser = false;
+// --- API ENDPOINTS ---
 
-    if (!user) {
-        isNewUser = true;
-        user = {
-            id: userId,
-            username: username,
-            starCrystals: 0,
-            telegramStars: 1, // Welcome bonus
-            ownedSkins: ['default'],
-            equippedSkin: 'default',
-            settings: { isSoundEnabled: true, isGamingFontEnabled: true },
-            progress: { hasSeenTutorial: false },
-            playerLives: 5,
-            lastLifeRegenTimestamp: Date.now(),
-            lastBonusClaimTimestamp: 0,
-            bonusStreak: 0,
-            lastConversionTimestamp: Date.now(),
-            referredBy: null,
-            referrals: [],
-        };
-        db.data.users[userId] = user;
-        message = "Welcome to Starfall Galaxy! You've received 1 ⭐️ as a welcome bonus!";
-        
-        // Handle referral if present
-        if (referrerId && db.data.users[referrerId] && referrerId.toString() !== userId.toString()) {
-            user.referredBy = referrerId;
-            user.telegramStars += 0.5; // New user bonus for being referred
-            message += "\nYou also got 0.5 ⭐️ for joining from a friend's invite!";
-
-            // Reward the referrer
-            db.data.users[referrerId].telegramStars += 1;
-            db.data.users[referrerId].referrals.push(userId);
-            console.log(`User ${referrerId} referred ${userId}. Awarding bonuses.`);
-        }
-    }
-
-    await db.write();
-    return { user, message, isNewUser };
-}
-
-
-// --- BOT COMMANDS ---
-// This handler now correctly works for users who manually type /start or /start ref_...
-bot.onText(/\/start(?: ref_(\d+))?/, async (msg, match) => {
-    const chatId = msg.chat.id;
-    const userId = msg.from.id.toString();
-    const username = msg.from.username || msg.from.first_name;
-    const referrerId = match[1]; // Will be null if no referral code is present
-
-    // getOrCreateUser will handle the logic for new/existing users and referrals
-    await getOrCreateUser(userId, username, referrerId);
-
-    const welcomeText = `Welcome to Starfall Galaxy, ${username}!\n\nCatch falling stars, customize your ship, and earn rewards. Use the commands below or tap the button to play!`;
-    const gameUrl = `https://t.me/${BOT_USERNAME}/play`;
-
-    bot.sendMessage(chatId, welcomeText, {
-        reply_markup: {
-            inline_keyboard: [
-                [{ text: '🚀 Play Now!', web_app: { url: gameUrl } }]
-            ]
-        }
-    });
+// GET / : Basic health check
+app.get('/', (req, res) => {
+    res.send('Starfall Galaxy Backend is running!');
 });
 
-bot.onText(/\/invite/, async (msg) => {
-    const userId = msg.from.id.toString();
-    // This deep link correctly points to the web app
-    const referralLink = `https://t.me/${BOT_USERNAME}/play?startapp=ref_${userId}`;
-    const inviteText = `Here is your personal invite link! Share it with friends.\n\nThey get 0.5 ⭐️ and you get 1 ⭐️ when they join!\n\n${referralLink}`;
-    bot.sendMessage(msg.chat.id, inviteText);
-});
-
-bot.onText(/\/balance/, async (msg) => {
-    const userId = msg.from.id.toString();
-    await db.read();
-    const user = db.data.users[userId];
-
-    if (user) {
-        const balanceText = `Your Balances:\n\n✨ Star Crystals: ${user.starCrystals}\n⭐️ Telegram Stars: ${user.telegramStars.toFixed(4)}`;
-        bot.sendMessage(msg.chat.id, balanceText);
-    } else {
-        bot.sendMessage(msg.chat.id, "I couldn't find your data. Try starting the game first by typing /start.");
-    }
-});
-
-bot.onText(/\/help/, (msg) => {
-    const helpText = `Available Commands:\n\n/start - Start the bot and get the play button.\n/invite - Get your personal referral link.\n/balance - Check your current currency balances.`;
-    bot.sendMessage(msg.chat.id, helpText);
-});
-
-// --- API ENDPOINTS FOR THE WEB APP ---
-app.post('/get-data', async (req, res) => {
+// POST /api/login : Load user data or create a new user
+app.post('/api/login', (req, res) => {
     const { initData } = req.body;
     if (!initData || !validateInitData(initData)) {
         return res.status(403).json({ error: 'Invalid initData' });
     }
 
-    try {
-        const tgUser = getUserFromInitData(initData);
-        let referrerId = null;
+    const params = new URLSearchParams(initData);
+    const user = JSON.parse(params.get('user'));
+    
+    let isNewUser = false;
+    let stmt = db.prepare('SELECT * FROM users WHERE id = ?');
+    let userData = stmt.get(user.id);
 
-        // --- FIX 2: Check initData for the 'start_param' to process web app referrals. ---
-        const urlParams = new URLSearchParams(initData);
-        const startParam = urlParams.get('start_param');
-        if (startParam && startParam.startsWith('ref_')) {
-            referrerId = startParam.substring(4); // Extracts the ID after "ref_"
-            console.log(`Referral detected from Web App deep link. Referrer ID: ${referrerId}`);
-        }
-
-        // Pass the extracted referrerId to the user creation logic
-        const { user, message } = await getOrCreateUser(tgUser.id.toString(), tgUser.username, referrerId);
+    if (!userData) {
+        isNewUser = true;
+        const now = Date.now();
+        stmt = db.prepare(`
+            INSERT INTO users (id, username, first_name, last_name, language_code, lastLifeRegenTimestamp, lastConversionTimestamp, createdAt, lastLoginAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        stmt.run(user.id, user.username, user.first_name, user.last_name, user.language_code, now, now, now, now);
         
-        // Respond with the user data and any welcome/referral message
-        res.json({ ...user, message });
-
-    } catch (e) {
-        console.error('Error in /get-data:', e);
-        res.status(500).json({ error: 'Internal server error' });
+        // Re-fetch to get default values
+        stmt = db.prepare('SELECT * FROM users WHERE id = ?');
+        userData = stmt.get(user.id);
+    } else {
+        stmt = db.prepare('UPDATE users SET lastLoginAt = ? WHERE id = ?');
+        stmt.run(Date.now(), user.id);
     }
+
+    res.json({
+        ...userData,
+        ownedSkins: JSON.parse(userData.ownedSkins),
+        settings: {
+            isSoundEnabled: !!userData.isSoundEnabled,
+            isGamingFontEnabled: !!userData.isGamingFontEnabled
+        },
+        progress: {
+            hasSeenTutorial: !!userData.hasSeenTutorial
+        },
+        isNewUser: isNewUser
+    });
 });
 
-app.post('/save-data', async (req, res) => {
-    const { initData, data } = req.body;
+// POST /api/save : Save user's game state
+app.post('/api/save', (req, res) => {
+    const { initData, gameState } = req.body;
     if (!initData || !validateInitData(initData)) {
         return res.status(403).json({ error: 'Invalid initData' });
     }
+    const user = JSON.parse(new URLSearchParams(initData).get('user'));
 
-    try {
-        const tgUser = getUserFromInitData(initData);
-        const userId = tgUser.id.toString();
+    const stmt = db.prepare(`
+        UPDATE users SET
+            starCrystals = ?, telegramStars = ?, ownedSkins = ?, equippedSkin = ?,
+            isSoundEnabled = ?, isGamingFontEnabled = ?, hasSeenTutorial = ?,
+            playerLives = ?, lastLifeRegenTimestamp = ?, lastBonusClaimTimestamp = ?,
+            bonusStreak = ?, lastConversionTimestamp = ?, crateAdWatchCount = ?
+        WHERE id = ?
+    `);
+    
+    stmt.run(
+        gameState.starCrystals, gameState.telegramStars, JSON.stringify(gameState.ownedSkins), gameState.equippedSkin,
+        gameState.settings.isSoundEnabled ? 1 : 0, gameState.settings.isGamingFontEnabled ? 1 : 0, gameState.progress.hasSeenTutorial ? 1 : 0,
+        gameState.playerLives, gameState.lastLifeRegenTimestamp, gameState.lastBonusClaimTimestamp,
+        gameState.bonusStreak, gameState.lastConversionTimestamp, gameState.crateAdWatchCount,
+        user.id
+    );
 
-        await db.read();
-        if (db.data.users[userId]) {
-            // Merge only the fields the client is allowed to change
-            db.data.users[userId] = {
-                ...db.data.users[userId], // Keep server-authoritative data
-                starCrystals: data.starCrystals,
-                telegramStars: data.telegramStars,
-                ownedSkins: data.ownedSkins,
-                equippedSkin: data.equippedSkin,
-                settings: data.settings,
-                progress: data.progress,
-                playerLives: data.playerLives,
-                lastLifeRegenTimestamp: data.lastLifeRegenTimestamp,
-                lastBonusClaimTimestamp: data.lastBonusClaimTimestamp,
-                bonusStreak: data.bonusStreak,
-                lastConversionTimestamp: data.lastConversionTimestamp,
-            };
-            await db.write();
-            res.json(db.data.users[userId]);
-        } else {
-            res.status(404).json({ error: 'User not found' });
-        }
-    } catch (e) {
-        console.error('Error in /save-data:', e);
-        res.status(500).json({ error: 'Internal server error' });
+    res.status(200).json({ success: true });
+});
+
+// POST /api/referral : Credit the inviter
+app.post('/api/referral', (req, res) => {
+    const { initData, startParam } = req.body;
+    if (!initData || !validateInitData(initData) || !startParam) {
+        return res.status(403).json({ error: 'Invalid request' });
+    }
+
+    const inviterId = startParam.split('_')[1];
+    if (!inviterId || isNaN(inviterId)) {
+        return res.status(400).json({ error: 'Invalid referral code' });
+    }
+
+    // Add 1 Telegram Star to the inviter's account
+    const stmt = db.prepare('UPDATE users SET telegramStars = telegramStars + 1 WHERE id = ?');
+    const result = stmt.run(parseInt(inviterId, 10));
+
+    if (result.changes > 0) {
+        console.log(`Credited 1 star to inviter ID: ${inviterId}`);
+        res.status(200).json({ success: true });
+    } else {
+        console.log(`Inviter ID not found: ${inviterId}`);
+        res.status(404).json({ error: 'Inviter not found' });
     }
 });
 
-app.get('/', (req, res) => {
-    res.send('Starfall Galaxy server is running!');
-});
 
-
-app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
+app.listen(port, () => {
+    console.log(`Server listening on port ${port}`);
 });
