@@ -1,109 +1,74 @@
 const express = require('express');
-const bodyParser = require('body-parser');
 const TelegramBot = require('node-telegram-bot-api');
-const fs = require('fs');
-const crypto = require('crypto');
 
 // --- CONFIGURATION ---
-const BOT_TOKEN = process.env.BOT_TOKEN || '8325959442:AAH_12MHRzxemyQLc6XTkoBjm9ei5lZlIr4'; 
-const WEB_APP_URL = process.env.WEB_APP_URL || 'https://starfallgalaxy.blogspot.com';
-const DB_PATH = './database.json';
+// These will be set in your hosting environment (Render)
+const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const SERVER_URL = process.env.PUBLIC_URL;
 
-// --- INITIALIZATION ---
+// IMPORTANT: Paste the URL of your game on Blogger here
+const BLOGGER_URL = 'https://starfallgalaxy.blogspot.com';
+
+const BOT_USERNAME = 'starfallgalaxy_bot'; // Your bot's username
+
+// --- SERVER & BOT INITIALIZATION ---
+const bot = new TelegramBot(TOKEN);
 const app = express();
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
-app.use(bodyParser.json());
 
-// --- DATABASE HELPERS ---
-const readDb = () => {
-    if (!fs.existsSync(DB_PATH)) {
-        return { users: {} };
-    }
-    return JSON.parse(fs.readFileSync(DB_PATH));
-};
-
-const writeDb = (data) => {
-    fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
-};
-
-const getInitialUserState = () => ({
-    starCrystals: 0,
-    telegramStars: 0,
-    ownedSkins: ['default'],
-    equippedSkin: 'default',
-    settings: { isSoundEnabled: true, isGamingFontEnabled: true },
-    progress: { hasSeenTutorial: false },
-    playerLives: 5,
-    lastLifeRegenTimestamp: Date.now(),
-    lastBonusClaimTimestamp: 0,
-    bonusStreak: 0,
-    lastConversionTimestamp: Date.now(),
-    crateAdWatchCount: 0,
-    referredBy: null,
+// This is the webhook endpoint that Telegram will send updates to
+app.use(express.json());
+app.post(`/bot${TOKEN}`, (req, res) => {
+  bot.processUpdate(req.body);
+  res.sendStatus(200);
 });
 
-// --- TELEGRAM WEB APP VALIDATION ---
-const validateInitData = (initData) => {
-    const urlParams = new URLSearchParams(initData);
-    const hash = urlParams.get('hash');
-    urlParams.delete('hash');
-    const dataCheckString = Array.from(urlParams.entries())
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([key, value]) => `${key}=${value}`)
-        .join('\n');
-    
-    const secretKey = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
-    const calculatedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
-    
-    return calculatedHash === hash;
+// --- BOT LOGIC ---
+
+// Create the button that opens your game
+const gameKeyboard = {
+    reply_markup: {
+        inline_keyboard: [
+            [{ text: '🌟 Play Starfall Galaxy 🌟', web_app: { url: BLOGGER_URL } }]
+        ]
+    }
 };
 
-
-// --- BOT COMMANDS ---
-bot.onText(/\/start(?: (.+))?/, (msg, match) => {
+// Command: /start
+bot.onText(/\/start/, (msg) => {
     const chatId = msg.chat.id;
-    const referrerId = match[1];
-
-    const db = readDb();
-    if (!db.users[chatId]) {
-        db.users[chatId] = getInitialUserState();
-        if(referrerId && referrerId != chatId) { // Ensure user cannot refer themselves
-            db.users[chatId].referredBy = referrerId;
-        }
-        writeDb(db);
-    }
-    
-    bot.sendMessage(chatId, "🚀 Welcome to Starfall Galaxy! 🚀", {
-        reply_markup: {
-            inline_keyboard: [
-                [{ text: 'Launch Game', web_app: { url: WEB_APP_URL } }]
-            ]
-        }
-    });
+    const welcomeMessage = "Welcome to Starfall Galaxy! ✨\n\nCatch falling stars, avoid bombs, and earn rewards. Click the button below to start playing!";
+    bot.sendMessage(chatId, welcomeMessage, gameKeyboard);
 });
 
-bot.onText(/\/help/, (msg) => {
+// Command: /play
+bot.onText(/\/play/, (msg) => {
+    bot.sendMessage(msg.chat.id, "Click below to jump into the action!", gameKeyboard);
+});
+
+// Command: /invite
+bot.onText(/\/invite/, (msg) => {
     const chatId = msg.chat.id;
-    bot.sendMessage(chatId, "Welcome to Starfall Galaxy!\n\nUse /start to launch the game.\n\nCatch stars, avoid bombs, and upgrade your gear!");
+    // This creates the link a user can share. Example: https://t.me/starfallgalaxy_bot?start=SFG1a2b3c
+    // The user's unique referral ID is generated and stored inside the game on Blogger.
+    // This command just provides the bot link for convenience.
+    const message = `To invite friends, open the game, go to the "Friends" screen, and share your personal link!`;
+    bot.sendMessage(chatId, message, gameKeyboard);
 });
 
 
-// --- API ENDPOINTS ---
-
-const validationMiddleware = (req, res, next) => {
-    const initData = req.query.initData || req.body.initData;
-    if (!initData || !validateInitData(initData)) {
-        return res.status(403).json({ message: 'Forbidden: Invalid Telegram data' });
+// --- START THE SERVER ---
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, async () => {
+    console.log(`Server is running on port ${PORT}`);
+    // Set the webhook. This tells Telegram where to send messages.
+    try {
+        const webhookUrl = `${SERVER_URL}/bot${TOKEN}`;
+        await bot.setWebHook(webhookUrl);
+        console.log(`Webhook set to ${webhookUrl}`);
+    } catch (error) {
+        console.error('Error setting webhook:', error.message);
     }
-    next();
-};
-
-// GET user data
-app.get('/api/user/:userId', validationMiddleware, (req, res) => {
-    const { userId } = req.params;
-    const db = readDb();
-    const user = db.users[userId];
-
+});
     if (user) {
         res.status(200).json(user);
     } else {
