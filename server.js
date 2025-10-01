@@ -5,7 +5,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 
 // --- CONFIGURATION ---
-const BOT_TOKEN = process.env.BOT_TOKEN || '8325959442:AAH_12MHRzxemyQLc6XTkoBjm9ei5lZlIr4';
+const BOT_TOKEN = process.env.BOT_TOKEN || '8325959442:AAH_12MHRzxemyQLc6XTkoBjm9ei5lZlIr4'; 
 const WEB_APP_URL = process.env.WEB_APP_URL || 'https://starfallgalaxy.blogspot.com';
 const DB_PATH = './database.json';
 
@@ -19,12 +19,7 @@ const readDb = () => {
     if (!fs.existsSync(DB_PATH)) {
         return { users: {} };
     }
-    try {
-        return JSON.parse(fs.readFileSync(DB_PATH));
-    } catch (e) {
-        console.error("Error reading or parsing DB file, returning empty DB", e);
-        return { users: {} };
-    }
+    return JSON.parse(fs.readFileSync(DB_PATH));
 };
 
 const writeDb = (data) => {
@@ -36,7 +31,6 @@ const getInitialUserState = () => ({
     telegramStars: 0,
     ownedSkins: ['default'],
     equippedSkin: 'default',
-    ownedBoosts: {},
     settings: { isSoundEnabled: true, isGamingFontEnabled: true },
     progress: { hasSeenTutorial: false },
     playerLives: 5,
@@ -46,28 +40,56 @@ const getInitialUserState = () => ({
     lastConversionTimestamp: Date.now(),
     crateAdWatchCount: 0,
     referredBy: null,
-    referrals: [], // List of user IDs this user has referred
-    userInfo: {}, // Store user's first/last name
 });
 
 // --- TELEGRAM WEB APP VALIDATION ---
 const validateInitData = (initData) => {
     const urlParams = new URLSearchParams(initData);
     const hash = urlParams.get('hash');
-    if (!hash) return false;
     urlParams.delete('hash');
     const dataCheckString = Array.from(urlParams.entries())
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([key, value]) => `${key}=${value}`)
         .join('\n');
     
-    const secretKey = crypto.createHmac('sha266', 'WebAppData').update(BOT_TOKEN).digest();
+    const secretKey = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
     const calculatedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
     
     return calculatedHash === hash;
 };
 
-// Middleware for validation
+
+// --- BOT COMMANDS ---
+bot.onText(/\/start(?: (.+))?/, (msg, match) => {
+    const chatId = msg.chat.id;
+    const referrerId = match[1];
+
+    const db = readDb();
+    if (!db.users[chatId]) {
+        db.users[chatId] = getInitialUserState();
+        if(referrerId && referrerId != chatId) { // Ensure user cannot refer themselves
+            db.users[chatId].referredBy = referrerId;
+        }
+        writeDb(db);
+    }
+    
+    bot.sendMessage(chatId, "🚀 Welcome to Starfall Galaxy! 🚀", {
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: 'Launch Game', web_app: { url: WEB_APP_URL } }]
+            ]
+        }
+    });
+});
+
+bot.onText(/\/help/, (msg) => {
+    const chatId = msg.chat.id;
+    bot.sendMessage(chatId, "Welcome to Starfall Galaxy!\n\nUse /start to launch the game.\n\nCatch stars, avoid bombs, and upgrade your gear!");
+});
+
+
+// --- API ENDPOINTS ---
+
 const validationMiddleware = (req, res, next) => {
     const initData = req.query.initData || req.body.initData;
     if (!initData || !validateInitData(initData)) {
@@ -76,30 +98,77 @@ const validationMiddleware = (req, res, next) => {
     next();
 };
 
-// --- BOT COMMANDS ---
-bot.onText(/\/start(?: (.+))?/, (msg, match) => {
-    const chatId = msg.chat.id;
-    const referrerId = match[1]; 
+// GET user data
+app.get('/api/user/:userId', validationMiddleware, (req, res) => {
+    const { userId } = req.params;
+    const db = readDb();
+    const user = db.users[userId];
+
+    if (user) {
+        res.status(200).json(user);
+    } else {
+        res.status(404).json({ message: 'User not found' });
+    }
+});
+
+// POST (save) user data
+app.post('/api/user/:userId', validationMiddleware, (req, res) => {
+    const { userId } = req.params;
+    const { state } = req.body;
+    const db = readDb();
+
+    if (!db.users[userId]) {
+        db.users[userId] = getInitialUserState();
+    }
+    db.users[userId] = { ...db.users[userId], ...state };
+
+    writeDb(db);
+    res.status(200).json({ message: 'Data saved successfully' });
+});
+
+// POST to process a new referral
+app.post('/api/referral', validationMiddleware, (req, res) => {
+    const { referrerId, newUserId } = req.body;
+
+    if (!referrerId || !newUserId || referrerId === newUserId) {
+        return res.status(400).json({ message: 'Invalid referral data' });
+    }
     
     const db = readDb();
-    if (!db.users[chatId]) {
-        db.users[chatId] = getInitialUserState();
-        if(referrerId && referrerId != chatId) { // Ensure user isn't referring themselves
-            db.users[chatId].referredBy = referrerId;
-        }
-    }
-    // Always update user info on start, as names can change
-    db.users[chatId].userInfo = {
-        firstName: msg.from.first_name,
-        lastName: msg.from.last_name || ''
-    };
-    writeDb(db);
+
+    if (!db.users[referrerId]) return res.status(404).json({ message: 'Referrer not found' });
+    if (!db.users[newUserId]) db.users[newUserId] = getInitialUserState();
+    if (db.users[newUserId].referredBy) return res.status(409).json({ message: 'User has already been referred' });
+
+    db.users[newUserId].referredBy = referrerId;
+    db.users[referrerId].telegramStars = (db.users[referrerId].telegramStars || 0) + 1;
     
-    bot.sendMessage(chatId, "🚀 Welcome to Starfall Galaxy! 🚀\n\nClick the button below to start your adventure!", {
-        reply_markup: {
-            inline_keyboard: [
-                [{ text: 'Launch Game', web_app: { url: WEB_APP_URL } }]
-            ]
+    writeDb(db);
+
+    bot.sendMessage(referrerId, `🎉 A friend has joined using your link! You've earned 1 ⭐️!`).catch(err => {
+        console.log(`Could not send message to referrer ${referrerId}:`, err.message);
+    });
+
+    res.status(200).json({ message: 'Referral processed successfully' });
+});
+
+// --- NEW API ENDPOINT ---
+// GET the number of friends a user has referred
+app.get('/api/user/:userId/referrals', validationMiddleware, (req, res) => {
+    const { userId } = req.params;
+    const db = readDb();
+    
+    const referredUsers = Object.values(db.users).filter(user => user.referredBy === userId);
+    
+    res.status(200).json({ count: referredUsers.length });
+});
+
+
+// --- START SERVER ---
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+});            ]
         }
     });
 });
